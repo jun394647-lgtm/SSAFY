@@ -5,3 +5,4 @@ requests==2.31.0
 beautifulsoup4==4.12.2
 notion-client==2.2.1
 APScheduler==3.10.4
+legacy-cgi
