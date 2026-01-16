@@ -2,3 +2,4 @@ streamlit
 feedparser
 playwright
 pytest-playwright
+openai 
