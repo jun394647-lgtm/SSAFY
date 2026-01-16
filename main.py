@@ -1,123 +1,141 @@
 import streamlit as st
+import requests
 import feedparser
 import asyncio
 from playwright.async_api import async_playwright
 from datetime import datetime
-import openai # 혹은 사용하시는 LLM 라이브러리
 
-# --- 1. 보안 설정 (Secrets 호출) ---
-# secrets에 값이 없을 경우를 대비한 예외 처리
+# --- 1. 환경 설정 및 보안 ---
 try:
-    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-    # NOTION_TOKEN = st.secrets["NOTION_TOKEN"] # 필요 시 활성화
+    GMS_KEY = st.secrets["GMS_KEY"]
 except KeyError:
-    st.error("Secrets 설정이 누락되었습니다. .streamlit/secrets.toml 파일을 확인하세요.")
+    st.error("GMS_KEY가 설정되지 않았습니다. Secrets를 확인해주세요.")
     st.stop()
 
-# --- 페이지 설정 ---
-st.set_page_config(page_title="Investor News Bot", layout="wide")
+API_URL = "https://gms.ssafy.io/gmsapi/api.openai.com/v1/chat/completions"
 
-# --- 2. 뉴스 수집 및 처리 로직 ---
+# --- 2. API 호출 함수 (GMS 전용) ---
+def call_gms_api(messages):
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GMS_KEY}"
+    }
+    payload = {
+        "model": "gpt-5-nano",
+        "messages": messages
+    }
+    try:
+        response = requests.post(API_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()['choices'][0]['message']['content']
+    except Exception as e:
+        return f"API 호출 오류: {e}"
 
+# --- 3. 뉴스 수집 및 크롤링 로직 ---
 def fetch_rss_news(keyword):
-    """RSS를 통한 기사 검색"""
+    """Google News RSS 수집"""
     rss_url = f"https://news.google.com/rss/search?q={keyword}&hl=ko&gl=KR&ceid=KR:ko"
     feed = feedparser.parse(rss_url)
     return feed.entries[:5]
 
-async def scrape_full_text(url):
-    """Playwright를 이용한 본문 크롤링"""
+async def scrape_content(url):
+    """Playwright를 이용한 본문 텍스트 추출"""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         try:
             await page.goto(url, timeout=30000)
-            # 투자자에게 필요한 본문 텍스트 추출 (사이트별로 선택자 조정 가능)
             content = await page.evaluate("() => document.body.innerText")
             await browser.close()
-            return content[:1000] # 분석을 위해 앞부분 1000자만 반환
-        except Exception:
+            return content[:1500] # 분석을 위한 선두 1500자
+        except:
             await browser.close()
-            return "본문을 가져올 수 없습니다."
+            return ""
 
-def analyze_intent(user_input):
-    """LLM을 이용한 뉴스 검색 의도 파악 (프롬프트 엔지니어링)"""
-    # 실제 구현 시 OpenAI API 등을 호출합니다.
-    # 여기서는 간단한 로직으로 대체하지만, 실제로는 st.secrets를 사용한 API 호출이 들어갑니다.
-    keywords = ["뉴스", "기사", "소식", "검색", "찾아줘"]
-    return any(word in user_input for word in keywords)
+# --- 4. 메인 UI 구성 ---
+st.set_page_config(page_title="투자자 뉴스 통합 챗봇", layout="wide")
 
-# --- 3. UI 구성 ---
+# 사이드바 페이지 전환
+st.sidebar.title("🚀 투자 뉴스 센터")
+menu = st.sidebar.radio("이동", ["메인: 뉴스 검색 챗봇", "아카이브: 테마별 뉴스"])
 
-st.sidebar.title("📈 투자자 뉴스 센터")
-page = st.sidebar.radio("이동하기", ["메인: AI 뉴스 챗봇", "아카이브: 테마별 뉴스"])
+# --- [페이지 1] 메인 뉴스 챗봇 ---
+if menu == "메인: 뉴스 검색 챗봇":
+    st.title("🤖 AI 뉴스 검색 비서")
+    st.info("뉴스 검색 요청 시 RSS 데이터를 가져와 gpt-5-nano가 요약해 드립니다.")
 
-# --- [페이지 1] 메인 챗봇 ---
-if page == "메인: AI 뉴스 챗봇":
-    st.title("🤖 뉴스 검색 & 요약 챗봇")
-    st.info("투자 키워드를 입력하면 RSS를 통해 뉴스를 찾아 요약해 드립니다.")
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+    # 대화 내용 표시
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    if prompt := st.chat_input("예: 삼성전자 최신 뉴스 보여줘"):
-        st.session_state.messages.append({"role": "user", "content": prompt})
+    if prompt := st.chat_input("메시지를 입력하세요 (예: 최근 삼성전자 뉴스 요약해줘)"):
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
+        # 1단계: LLM을 이용한 의도 파악 (프롬프트 엔지니어링)
+        intent_check_messages = [
+            {"role": "developer", "content": "사용자 입력이 뉴스/기사 검색 요청인지 판단하여 'NEWS' 또는 'GENERAL'로만 답하세요."},
+            {"role": "user", "content": prompt}
+        ]
+        intent = call_gms_api(intent_check_messages).strip()
+
         with st.chat_message("assistant"):
-            # 의도 판단
-            if analyze_intent(prompt):
-                st.write(f"🔍 '{prompt}' 관련 뉴스를 검색합니다...")
+            if "NEWS" in intent:
+                st.write("🔍 최신 뉴스를 검색하고 있습니다...")
                 news_items = fetch_rss_news(prompt)
                 
                 if news_items:
-                    response_md = ""
+                    articles_summary = ""
+                    for i, item in enumerate(news_items):
+                        articles_summary += f"{i+1}. {item.title} (출처: {item.source.get('title')})\n"
+                    
+                    # 2단계: 수집된 뉴스를 바탕으로 최종 응답 생성
+                    summarize_messages = [
+                        {"role": "developer", "content": "제공된 뉴스 목록을 바탕으로 투자자에게 도움이 되도록 요약하고 한국어로 답변하세요."},
+                        {"role": "user", "content": f"검색된 뉴스들:\n{articles_summary}\n\n이 뉴스들을 요약해줘."}
+                    ]
+                    final_response = call_gms_api(summarize_messages)
+                    
+                    # 뉴스 카드 표시
                     for item in news_items:
                         with st.expander(f"📰 {item.title}"):
-                            st.write(f"출처: {item.source.get('title', '알 수 없음')} | 날짜: {item.published}")
-                            st.write(f"[원문 링크]({item.link})")
-                            # 필요 시 버튼 클릭으로 Playwright 실행 가능
-                            if st.button("AI 상세 요약 생성", key=item.link):
-                                full_text = asyncio.run(scrape_full_text(item.link))
-                                st.write("**본문 요약 중...**")
-                                st.write(full_text[:300] + "...") # 예시 출력
-                        response_md += f"- {item.title}\n"
-                    st.session_state.messages.append({"role": "assistant", "content": f"검색 결과입니다:\n{response_md}"})
+                            st.write(f"날짜: {item.published}")
+                            st.write(f"[기사 원문 보기]({item.link})")
+                    
+                    st.markdown(final_response)
+                    st.session_state.chat_history.append({"role": "assistant", "content": final_response})
                 else:
-                    st.write("검색 결과가 없습니다.")
+                    st.write("관련 뉴스를 찾을 수 없습니다.")
             else:
-                response = "일반 대화 모드입니다. 투자 뉴스에 대해 물어봐주세요!"
+                # 일반 챗봇 응답
+                gen_messages = [
+                    {"role": "developer", "content": "투자 전문가로서 한국어로 친절하게 답변하세요."},
+                    {"role": "user", "content": prompt}
+                ]
+                response = call_gms_api(gen_messages)
                 st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
+                st.session_state.chat_history.append({"role": "assistant", "content": response})
 
-# --- [페이지 2] 테마별 뉴스 ---
-elif page == "아카이브: 테마별 뉴스":
-    st.title("📁 테마별 맞춤 기사 리스트")
+# --- [페이지 2] 테마별 뉴스 아카이브 ---
+elif menu == "아카이브: 테마별 뉴스":
+    st.title("📁 테마별 수집 데이터")
     
-    themes = ["반도체", "2차전지", "매크로 경제", "미국 증시"]
-    selected_theme = st.selectbox("관심 테마를 선택하세요", themes)
+    selected_theme = st.selectbox("리뷰할 테마를 선택하세요", ["반도체", "정치", "경제", "과학/기술"])
     
-    st.subheader(f"📍 {selected_theme} 테마 수집 현황")
+    st.subheader(f"📍 {selected_theme} 관련 자동 수집 결과")
     
-    # 이 부분은 실제 Supabase나 Notion DB에서 불러오는 로직으로 대체됩니다.
-    st.write(f"최근 수집 시간: {datetime.now().strftime('%Y-%m-%d %H:%00')}")
-    
-    # 가상의 데이터 그리드 (st.dataframe 또는 카드 UI)
-    col1, col2 = st.columns(2)
-    with col1:
-        with st.container(border=True):
-            st.write("**뉴스 제목 샘플**")
-            st.caption("2024-05-22")
-            st.write("이 기사는 해당 테마의 주요 변곡점을 다루고 있습니다.")
-            st.link_button("Notion에서 보기", "https://notion.so")
-    with col2:
-         with st.container(border=True):
-            st.write("**뉴스 제목 샘플 2**")
-            st.caption("2024-05-22")
-            st.write("시장 컨센서스를 상회하는 실적 발표 관련 뉴스입니다.")
-            st.link_button("원문 확인", "https://news.naver.com")
+    # 실제 구현 시에는 DB(Supabase)나 Notion에서 데이터를 쿼리해오는 코드가 들어갑니다.
+    # 현재는 UI 레이아웃 예시를 보여줍니다.
+    cols = st.columns(2)
+    for i in range(4):
+        with cols[i % 2]:
+            with st.container(border=True):
+                st.markdown(f"### {selected_theme} 테마 주요 기사 #{i+1}")
+                st.caption(f"수집 일시: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+                st.write("이 영역에는 지정된 시간에 수집되어 Notion/Supabase에 저장된 요약본이 표시됩니다.")
+                st.button("상세 분석 보기", key=f"btn_{i}")
