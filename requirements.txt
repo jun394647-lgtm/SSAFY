@@ -1,8 +1,8 @@
-streamlit==1.28.1
+streamlit>=1.30.0  # 버전을 1.30.0 이상으로 명시
 feedparser==6.0.10
 python-dotenv==1.0.0
 requests==2.31.0
 beautifulsoup4==4.12.2
 notion-client==2.2.1
 APScheduler==3.10.4
-legacy-cgi
+legacy-cgi          # 파이썬 3.13 대응 (필요 시)
